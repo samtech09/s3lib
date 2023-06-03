@@ -46,16 +46,28 @@ func GetSession(cfg *Config) (*S3Session, error) {
 	// Create a single AWS session (we can re use this if we're uploading many files)
 	//s, err := session.NewSession(&aws.Config{Region: aws.String(S3_REGION)})
 
-	s, err := session.NewSession(
-		&aws.Config{
-			Region:   aws.String(cfg.S3Region),
-			Endpoint: aws.String(cfg.Endpoint),
-			Credentials: credentials.NewStaticCredentials(
-				cfg.AccessKey,
-				cfg.SecretKey,
-				"", // a token will be created when the session it's used.
-			),
-		})
+	awscfg := aws.Config{}
+	awscfg.Region = aws.String(cfg.S3Region)
+	if cfg.Endpoint != "" {
+		awscfg.Endpoint = aws.String(cfg.Endpoint)
+	}
+	awscfg.Credentials = credentials.NewStaticCredentials(
+		cfg.AccessKey,
+		cfg.SecretKey,
+		"", // a token will be created when the session it's used.
+	)
+	s, err := session.NewSession(&awscfg)
+
+	// s, err := session.NewSession(
+	// 	&aws.Config{
+	// 		Region:   aws.String(cfg.S3Region),
+	// 		Endpoint: aws.String(cfg.Endpoint),
+	// 		Credentials: credentials.NewStaticCredentials(
+	// 			cfg.AccessKey,
+	// 			cfg.SecretKey,
+	// 			"", // a token will be created when the session it's used.
+	// 		),
+	// 	})
 
 	if err != nil {
 		return nil, err
