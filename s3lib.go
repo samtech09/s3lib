@@ -24,10 +24,11 @@ const (
 )
 
 type Config struct {
-	S3Region  string
-	Endpoint  string
-	AccessKey string
-	SecretKey string
+	S3Region         string
+	Endpoint         string
+	AccessKey        string
+	SecretKey        string
+	S3ForcePathStyle bool
 }
 
 type S3Object struct {
@@ -50,6 +51,9 @@ func GetSession(cfg *Config) (*S3Session, error) {
 	awscfg.Region = aws.String(cfg.S3Region)
 	if cfg.Endpoint != "" {
 		awscfg.Endpoint = aws.String(cfg.Endpoint)
+	}
+	if cfg.S3ForcePathStyle {
+		awscfg.S3ForcePathStyle = aws.Bool(true)
 	}
 	awscfg.Credentials = credentials.NewStaticCredentials(
 		cfg.AccessKey,
