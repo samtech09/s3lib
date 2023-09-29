@@ -38,6 +38,18 @@ func TestAddObjects(t *testing.T) {
 	}
 }
 
+func TestHeadFile(t *testing.T) {
+	file := ""
+	for i := 1; i < 4; i++ {
+		file = fmt.Sprintf("wall-bg-%d.jpg", i)
+		tm, err := _sess.HeadFile(bucket, _remotefolder+"/"+file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("%s last modified on %s\n", file, tm)
+	}
+}
+
 func TestDeleteObjects(t *testing.T) {
 	file := "wall-bg-1.jpg"
 	err := _sess.RemoveFile(bucket, _remotefolder+"/"+file)

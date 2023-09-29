@@ -3,6 +3,7 @@ package s3lib
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"fmt"
 	"io"
 	"net/http"
@@ -102,18 +103,22 @@ func (s *S3Session) ListObjects(bucketName, folder string) ([]S3Object, error) {
 	return contents, err
 }
 
-func (s *S3Session) GetFile(w http.ResponseWriter, bucket, filekey string) (int64, error) {
+func (s *S3Session) GetFile(w http.ResponseWriter, bucket, filekey string, cacheDurinSeconds int) (int64, error) {
 	result, err := s.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(filekey),
 	})
 	if err != nil {
 		//http.Error(w, fmt.Sprintf("Error getting file from s3 %s", err.Error()), http.StatusInternalServerError)
-		return 0, fmt.Errorf("error getting file from s3 %s", err.Error())
+		return 0, fmt.Errorf("error getting file from storage %s", err.Error())
 	}
 
 	//w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", "my-file.csv"))
-	//w.Header().Set("Cache-Control", "no-store")
+	if cacheDurinSeconds > 0 {
+		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", cacheDurinSeconds)) // cache for 6 months
+		w.Header().Set("Etag", s.Hash(filekey, result.LastModified.String()))
+	}
+
 	w.Header().Set("Content-Type", *result.ContentType)
 	defer result.Body.Close()
 	bytesWritten, copyErr := io.Copy(w, result.Body)
@@ -123,6 +128,19 @@ func (s *S3Session) GetFile(w http.ResponseWriter, bucket, filekey string) (int6
 	}
 
 	return bytesWritten, nil
+}
+
+// HeadFile make head request to S3 storage and get metadata of file without getting file contents
+func (s *S3Session) HeadFile(bucket, filekey string) (time.Time, error) {
+	result, err := s.HeadObject(&s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(filekey),
+	})
+	if err != nil {
+		//http.Error(w, fmt.Sprintf("Error getting file from s3 %s", err.Error()), http.StatusInternalServerError)
+		return time.Now(), fmt.Errorf("error heading file from storage %s", err.Error())
+	}
+	return *result.LastModified, nil
 }
 
 // UploadFile will upload a single file to S3, it will require a pre-built aws session
@@ -303,4 +321,12 @@ func (s *S3Session) RemoveFolder(bucket, folder string) error {
 	// delete folder itself
 	_, err = s.DeleteObject(&s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(folder)})
 	return err
+}
+
+// md5Str gives MD5 hash of given string and salt
+func (s *S3Session) Hash(filekey, lastmodified string) string {
+	h := md5.New()
+	h.Write([]byte(filekey + lastmodified))
+
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
