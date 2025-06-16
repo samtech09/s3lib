@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +31,8 @@ type Config struct {
 	AccessKey        string
 	SecretKey        string
 	S3ForcePathStyle bool
+	Gcs              bool // google-cloud-storage
+	Debug            bool
 }
 
 type S3Object struct {
@@ -41,6 +44,8 @@ type S3Object struct {
 
 type S3Session struct {
 	*s3.S3
+	Debug bool
+	Gcs   bool
 }
 
 // GetSession creates a new AWS session. Can be reused to upload multiple files
@@ -79,19 +84,16 @@ func GetSession(cfg *Config) (*S3Session, error) {
 	}
 
 	s3ses := s3.New(session.Must(s, err))
-	if err != nil {
-		return nil, err
-	}
-	return &S3Session{s3ses}, nil
+	return &S3Session{s3ses, cfg.Debug, cfg.Gcs}, nil
 }
 
-func (s *S3Session) ListObjects(bucketName, folder string) ([]S3Object, error) {
+func (s *S3Session) ListObjects(bucket, folder string) ([]S3Object, error) {
 	result, err := s.ListObjectsV2WithContext(context.TODO(), &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucketName),
+		Bucket: aws.String(bucket),
 		Prefix: aws.String(folder),
 	})
 	if err != nil {
-		//log.Printf("Couldn't list objects in bucket %v. Here's why: %v\n", bucketName, err)
+		s.logentry("ListObjects", "[bucket:%s] list objects error: %s", bucket, err.Error())
 		return nil, err
 	}
 
@@ -100,7 +102,8 @@ func (s *S3Session) ListObjects(bucketName, folder string) ([]S3Object, error) {
 		contents = append(contents, S3Object{Filename: *v.Key, Etag: *v.ETag, Size: *v.Size, LastModified: *v.LastModified})
 	}
 
-	return contents, err
+	s.logentry("ListObjects", "[bucket:%s] %d objects listed", bucket, len(contents))
+	return contents, nil
 }
 
 func (s *S3Session) GetFile(w http.ResponseWriter, bucket, filekey string, cacheDurinSeconds int) (int64, error) {
@@ -109,7 +112,7 @@ func (s *S3Session) GetFile(w http.ResponseWriter, bucket, filekey string, cache
 		Key:    aws.String(filekey),
 	})
 	if err != nil {
-		//http.Error(w, fmt.Sprintf("Error getting file from s3 %s", err.Error()), http.StatusInternalServerError)
+		s.logentry("GetFile", "[bucket:%s, key:%s] getobject error: %s", bucket, filekey, err.Error())
 		return 0, fmt.Errorf("error getting file from storage %s", err.Error())
 	}
 
@@ -123,10 +126,11 @@ func (s *S3Session) GetFile(w http.ResponseWriter, bucket, filekey string, cache
 	defer result.Body.Close()
 	bytesWritten, copyErr := io.Copy(w, result.Body)
 	if copyErr != nil {
-		//http.Error(w, fmt.Errorf("Error copying file to the http response %s", copyErr.Error()), http.StatusInternalServerError)
+		s.logentry("GetFile", "[bucket:%s, key:%s] error copying file to http response: %s", bucket, filekey, copyErr.Error())
 		return 0, fmt.Errorf("error copying file to the http response %s", copyErr.Error())
 	}
 
+	s.logentry("ListObjects", "[bucket:%s, key:%s] getobject succeeded", bucket, filekey)
 	return bytesWritten, nil
 }
 
@@ -137,19 +141,20 @@ func (s *S3Session) HeadFile(bucket, filekey string) (time.Time, error) {
 		Key:    aws.String(filekey),
 	})
 	if err != nil {
-		//http.Error(w, fmt.Sprintf("Error getting file from s3 %s", err.Error()), http.StatusInternalServerError)
+		s.logentry("HeadFile", "[bucket:%s, key:%s] headobject error: %s", bucket, filekey, err.Error())
 		return time.Now(), fmt.Errorf("error heading file from storage %s", err.Error())
 	}
+	s.logentry("HeadFile", "[bucket:%s, key:%s] headobject succeeded", bucket, filekey)
 	return *result.LastModified, nil
 }
 
 // UploadFile will upload a single file to S3, it will require a pre-built aws session
 // and will set file info like content type and encryption on the uploaded file.
 func (s *S3Session) UploadFile(fileToUpload, remoteFileName, bucket, contentType string) error {
-
 	// Open the file for use
 	file, err := os.Open(fileToUpload)
 	if err != nil {
+		s.logentry("UploadFile", "[local-file:%s] file open error: %s", fileToUpload, err.Error())
 		return err
 	}
 	defer file.Close()
@@ -179,7 +184,12 @@ func (s *S3Session) UploadFile(fileToUpload, remoteFileName, bucket, contentType
 		//ContentDisposition:   aws.String("attachment"),
 		//ServerSideEncryption: aws.String("AES256"),
 	})
-	return err
+	if err != nil {
+		s.logentry("UploadFile", "[bucket:%s, local-file:%s] putobject error: %s", bucket, fileToUpload, err.Error())
+		return err
+	}
+	s.logentry("UploadFile", "[bucket:%s, local-file:%s] putobject succeeded", bucket, fileToUpload)
+	return nil
 }
 
 // UploadLargeFile will upload a single large file to S3 as multipart uplaod, it will require a pre-built aws session
@@ -187,6 +197,7 @@ func (s *S3Session) UploadLargeFile(fileToUpload, remoteFileName, bucket, conten
 	// Open the file for use
 	file, err := os.Open(fileToUpload)
 	if err != nil {
+		s.logentry("UploadLargeFile", "[local-file:%s] file open error: %s", fileToUpload, err.Error())
 		return err
 	}
 	defer file.Close()
@@ -217,7 +228,7 @@ func (s *S3Session) UploadLargeFile(fileToUpload, remoteFileName, bucket, conten
 	})
 
 	if err != nil {
-		fmt.Println(err)
+		s.logentry("UploadLargeFile", "[bucket:%s, local-file:%s, contentType:%s] CreateMultipartUpload error: %s", bucket, fileToUpload, contentType, err.Error())
 		return err
 	}
 
@@ -242,8 +253,7 @@ func (s *S3Session) UploadLargeFile(fileToUpload, remoteFileName, bucket, conten
 				UploadId: createdResp.UploadId,
 			})
 			if err != nil {
-				// god speed
-				fmt.Println(err)
+				s.logentry("UploadLargeFile", "[bucket:%s, local-file:%s, contentType:%s] multipartUpload error: %s", bucket, fileToUpload, contentType, err.Error())
 				return err
 			}
 		}
@@ -268,8 +278,9 @@ func (s *S3Session) UploadLargeFile(fileToUpload, remoteFileName, bucket, conten
 		},
 	})
 	if err != nil {
-		fmt.Println(err)
+		s.logentry("UploadLargeFile", "[bucket:%s, local-file:%s, contentType:%s] CompleteMultipartUpload error: %s", bucket, fileToUpload, contentType, err.Error())
 	} else {
+		s.logentry("UploadLargeFile", "[bucket:%s, local-file:%s, contentType:%s] upload-large-file succeeded", bucket, fileToUpload, contentType)
 		fmt.Println(resp.String())
 	}
 
@@ -280,6 +291,7 @@ func (s *S3Session) UploadLargeFile(fileToUpload, remoteFileName, bucket, conten
 func (s *S3Session) RemoveFile(bucket, remoteFileName string) error {
 	_, err := s.DeleteObject(&s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(remoteFileName)})
 	if err != nil {
+		s.logentry("RemoveFile", "[bucket:%s, key:%s] delete error: %s", bucket, remoteFileName, err.Error())
 		return err
 	}
 
@@ -287,7 +299,12 @@ func (s *S3Session) RemoveFile(bucket, remoteFileName string) error {
 		Bucket: aws.String(bucket),
 		Key:    aws.String(remoteFileName),
 	})
-	return err
+	if err != nil {
+		s.logentry("RemoveFile", "[bucket:%s, key:%s] WaitUntilObjectNotExists error: %s", bucket, remoteFileName, err.Error())
+		return err
+	}
+	s.logentry("RemoveFile", "[bucket:%s, key:%s] delete succeeded", bucket, remoteFileName)
+	return nil
 }
 
 // RemoveFolder will remove given folder and all of it's files from S3
@@ -298,29 +315,41 @@ func (s *S3Session) RemoveFolder(bucket, folder string) error {
 	})
 	//var contents []types.Object
 	if err != nil {
-		//log.Printf("Couldn't list objects in bucket %v. Here's why: %v\n", bucket, err)
-		return err
+		s.logentry("RemoveFolder", "[bucket:%s] list objects error: %s", bucket, err.Error())
+		return fmt.Errorf("list objects error: %s", err.Error())
 	}
 
-	keys := []*s3.ObjectIdentifier{}
-	for _, v := range result.Contents {
-		keys = append(keys, &s3.ObjectIdentifier{Key: v.Key})
+	if s.Gcs {
+		s.removeBulkGcs(bucket, folder, result)
+	} else {
+		keys := []*s3.ObjectIdentifier{}
+		for _, v := range result.Contents {
+			keys = append(keys, &s3.ObjectIdentifier{Key: v.Key})
+		}
+
+		_, err = s.DeleteObjects(&s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &s3.Delete{
+				Objects: keys,
+				Quiet:   aws.Bool(false),
+			},
+		})
+		if err != nil {
+			s.logentry("RemoveFolder", "[keys: %d] buld delete error: %s", len(keys), err.Error())
+			return fmt.Errorf("bulk delete error: %s", err.Error())
+		}
+		s.logentry("RemoveFolder", "[bucket:%s, folder:%s] all objects deleted", bucket, folder)
+
+		// delete folder itself
+		_, err = s.DeleteObject(&s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(folder)})
+		if err != nil {
+			s.logentry("RemoveFolder", "[bucket:%s, key:%s] folder delete error: %s", bucket, folder, err.Error())
+			return fmt.Errorf("object delete error: %s", err.Error())
+		}
 	}
 
-	_, err = s.DeleteObjects(&s3.DeleteObjectsInput{
-		Bucket: aws.String(bucket),
-		Delete: &s3.Delete{
-			Objects: keys,
-			Quiet:   aws.Bool(false),
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	// delete folder itself
-	_, err = s.DeleteObject(&s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(folder)})
-	return err
+	s.logentry("RemoveFolder", "[bucket:%s, key:%s] folder delete succeeded", bucket, folder)
+	return nil
 }
 
 // md5Str gives MD5 hash of given string and salt
@@ -329,4 +358,17 @@ func (s *S3Session) Hash(filekey, lastmodified string) string {
 	h.Write([]byte(filekey + lastmodified))
 
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func (s *S3Session) logentry(method, format string, v ...any) {
+	if s.Debug {
+		// add method to beginning of passed arguments for formating
+		v = addElementToFirstIndex(v, method)
+		log.Printf("[%s] "+format, v...)
+	}
+}
+
+func addElementToFirstIndex(x []interface{}, y interface{}) []interface{} {
+	x = append([]interface{}{y}, x...)
+	return x
 }

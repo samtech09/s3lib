@@ -22,7 +22,7 @@ func (s *S3Session) multipartUpload(resp *s3.CreateMultipartUploadOutput, fileBy
 		})
 		// Upload failed
 		if err != nil {
-			fmt.Println(err)
+			s.logentry("multipartUpload", "[partnum:%d, try:%d] multipartUpload error: %s", partNum, try, err.Error())
 			// Max retries reached! Quitting
 			if try == _RETRIES {
 				return nil, err
@@ -40,4 +40,20 @@ func (s *S3Session) multipartUpload(resp *s3.CreateMultipartUploadOutput, fileBy
 	}
 
 	return nil, nil
+}
+
+func (s *S3Session) removeBulkGcs(bucket, folder string, list *s3.ListObjectsV2Output) error {
+	var err error
+	for _, v := range list.Contents {
+		_, err = s.DeleteObject(&s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(*v.Key)})
+		if err != nil {
+			s.logentry("removeBulkGcs", "[bucket:%s, key:%s] delete error: %s", bucket, *v.Key, err.Error())
+			return fmt.Errorf("object delete error: %s", err.Error())
+		}
+	}
+	s.logentry("removeBulkGcs", "[bucket:%s, folder:%s] all objects deleted", bucket, folder)
+
+	//in gcs empty folder will be deleted itself
+
+	return nil
 }
